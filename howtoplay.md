@@ -39,7 +39,7 @@
 ---
 
 # 🤖 Plug-and-Play with Real Robot with ROS1
-
+> Zhonglin servo version
 ## 1. Start ROS Core
 
 Open a terminal and run:
@@ -82,6 +82,50 @@ Choose your robot and run the corresponding script:
   rosrun uarm scripts/Follower_Arm/xarm/servo2xarm.py
   ```
 
+---
+
+> Feetech servo version (Global Version)
+## 1. Start ROS Core
+
+Open a terminal and run:
+
+```sh
+roscore
+```
+
+## 2. Verify Teleop Arm Output
+
+In a new terminal, check servo readings:
+
+```sh
+rosrun uarm feetech_servo_zero.py
+```
+
+This will display real-time angles from all servos. You should check whether `SERIAL_PORT` is available on your device and modify the variable if necessary. You may find all servos' angles are `2047` since servo's position is set as `2047` (0~4095 for $360^\circ$) when this code starts running.
+
+## 3. Publish Teleop Data
+
+Still in the second terminal, start the teleop publisher:
+
+```sh
+rosrun uarm feetech_servo_reader.py
+```
+
+Servo's position is set again as `2047` when this code starts running . **Please return UARM to initial position before starting this script.** Your teleop arm now publishes to the `/servo_angles` topic.
+
+## 4. Control the Follower Arm
+
+Choose your robot and run the corresponding script:
+
+- **For Dobot CR5:**
+  ```sh
+  rosrun uarm scripts/Follower_Arm/Dobot/servo2Dobot.py
+  ```
+
+- **For xArm:**
+  ```sh
+  rosrun uarm scripts/Follower_Arm/xarm/servo2xarm.py
+  ```
 ---
 
 # 🖥️ Try It Out in Simulation
