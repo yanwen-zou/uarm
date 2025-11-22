@@ -12,6 +12,7 @@ class XArmTeleopNode:
         rospy.init_node("xarm_teleop_node")
         self.pub = rospy.Publisher('/robot_action', Float64MultiArray, queue_size=10)
         self.rate = rospy.Rate(20)
+        self.arm_topic = rospy.get_param("~arm_topic", "/arm_left")
 
         self.init_qpos = np.radians([14.1, -8, -24.7, 196.9, 62.3, -8.8, 0.0])
         self.arm = XArmAPI('192.168.1.199')
@@ -19,7 +20,8 @@ class XArmTeleopNode:
         self.arm_qpos = self.init_qpos
 
         self.gripper_range = 0.48
-        rospy.Subscriber('/servo_angles', Float64MultiArray, self.servo_callback)
+        rospy.Subscriber(self.arm_topic, Float64MultiArray, self.servo_callback)
+        rospy.loginfo(f"Subscribed to {self.arm_topic} for teleop commands")
 
     def _init_arm(self):
         self.arm.motion_enable(enable=True) 
@@ -30,7 +32,14 @@ class XArmTeleopNode:
 
     def servo_callback(self, msg):
         angle_offset = list(msg.data)
-        self.arm_qpos = self.deg_angle_to_rad_xarm(angle_offset)
+        if len(angle_offset) < 7:
+            rospy.logwarn_throttle(5.0, f"Received {len(angle_offset)} angles, expected >= 7")
+            return
+
+        # Use first six joints for the arm and the last value as gripper
+        gripper_angle = angle_offset[7] if len(angle_offset) > 7 else angle_offset[-1]
+        servo_angles = angle_offset[:6] + [gripper_angle]
+        self.arm_qpos = self.deg_angle_to_rad_xarm(servo_angles)
 
 
     def pwm_to_angle(self, response_str, pwm_min=500, pwm_max=2500, angle_range=270):

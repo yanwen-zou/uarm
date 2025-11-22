@@ -14,11 +14,13 @@ class RobotControlNode:
 
         # ROS initialization
         rospy.init_node('dobot_teleop_node')
+        self.arm_topic = rospy.get_param("~arm_topic", "/arm_left")
         # Publish current robot state topic
         self.state_pub = rospy.Publisher('/robot_action', Float64MultiArray, queue_size=10)
 
         # Subscribe to control command topic
-        rospy.Subscriber('/servo_angles', Float64MultiArray, self.joint_cmd_callback)
+        rospy.Subscriber(self.arm_topic, Float64MultiArray, self.joint_cmd_callback)
+        rospy.loginfo(f"Subscribed to {self.arm_topic} for teleop commands")
 
         # Timer to publish robot state
         self.rate = rospy.Rate(10)  # 10hz
@@ -29,9 +31,13 @@ class RobotControlNode:
     def joint_cmd_callback(self, msg):
         """Handle received joint control commands"""
         try:
-            # Print received data
-            print(f"msg.data:{msg.data[:6]}")
             servo_angles = np.array(msg.data)
+            if servo_angles.shape[0] < 6:
+                rospy.logwarn_throttle(5.0, f"Received {servo_angles.shape[0]} angles, expected >= 6")
+                return
+
+            # Print received data
+            print(f"msg.data:{servo_angles[:6]}")
 
             servo_angles[1] = -servo_angles[1] #adjustment
 
