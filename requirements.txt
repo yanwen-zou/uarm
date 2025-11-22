@@ -12,7 +12,6 @@ cloudpickle==3.1.1
 colored==1.4.4
 comm==0.2.3
 contourpy==1.1.1
-cv-bridge==1.16.2  # 若在纯非ROS环境请删去；已在上面ROS清单
 cycler==0.12.1
 dacite==1.9.2
 debugpy==1.8.16

@@ -19,25 +19,37 @@ class ServoTeleoperatorSim:
     Supported robot arm types: arx-x5, so100, xarm6_robotiq, panda, x_fetch, unitree_h1
     """
     
-    def __init__(self, scene: str, robot_uids: str, serial_port: str = '/dev/ttyUSB0'):
+    def __init__(self, scene: str, robot_uids: str, serial_port: str = '/dev/ttyUSB0', serial_port2: str = '/dev/ttyUSB1'):
         """Initialize teleoperation system
         
         Args:
             scene: Simulation scene name
             robot_uids: Robot arm type identifier
             serial_port: Serial port device path
+            serial_port2: Second serial port (used for dual-arm setups)
         """
         # Serial port configuration
         self.SERIAL_PORT = serial_port
+        self.SERIAL_PORT2 = serial_port2 if robot_uids == "openarm_bi" else None
         self.BAUDRATE = 115200
-        self.ser = serial.Serial(self.SERIAL_PORT, self.BAUDRATE, timeout=0.01)
+        self.ser_primary = serial.Serial(self.SERIAL_PORT, self.BAUDRATE, timeout=0.01)
+        self.ser_secondary = (
+            serial.Serial(self.SERIAL_PORT2, self.BAUDRATE, timeout=0.01)
+            if self.SERIAL_PORT2
+            else None
+        )
 
         # System configuration
         self.scene = scene
         self.robot_uids = robot_uids
         self.gripper_range = 0.48
-        self.zero_angles = [0.0] * 7  # Initial calibration angles for servos
-        self.sim_init_angles = [0.0] * 7  # Simulation initial angles
+        # Reserve storage for incoming servo angles (8 DOF by default; 16 for dual-arm OpenArm)
+        if robot_uids == "openarm_bi":
+            self.zero_angles = [0.0] * 16
+            self.sim_init_angles = [0.0] * 16
+        else:
+            self.zero_angles = [0.0] * 8  # Initial calibration angles for servos
+            self.sim_init_angles = [0.0] * 8  # Simulation initial angles
         self.stop_event = Event()
         self.rate = 50.0  # Control frequency
         
@@ -140,27 +152,37 @@ class ServoTeleoperatorSim:
     
     def _init_servos(self):
         """Initialize servos and calibrate zero position angles"""
-        self.send_command('#000PVER!')
-        for i in range(7):
-            self.send_command("#000PCSK!")
-            self.send_command(f'#{i:03d}PULK!')
-            response = self.send_command(f'#{i:03d}PRAD!')
-            angle = self.pwm_to_angle(response.strip())
-            self.zero_angles[i] = angle if angle is not None else 0.0
+        def _init_port(ser_obj, start_idx, count):
+            self.send_command(ser_obj, "#000PVER!")
+            for i in range(count):
+                self.send_command(ser_obj, "#000PCSK!")
+                self.send_command(ser_obj, f"#{i:03d}PULK!")
+                response = self.send_command(ser_obj, f"#{i:03d}PRAD!")
+                angle = self.pwm_to_angle(response.strip())
+                self.zero_angles[start_idx + i] = angle if angle is not None else 0.0
+
+        if self.robot_uids == "openarm_bi":
+            _init_port(self.ser_primary, 0, 8)
+            if self.ser_secondary is None:
+                raise RuntimeError("openarm_bi requires a second serial port for the right arm")
+            _init_port(self.ser_secondary, 8, 8)
+        else:
+            _init_port(self.ser_primary, 0, 7)
         print("[INFO] Servo initial angle calibration completed")
 
-    def send_command(self, cmd: str) -> str:
+    def send_command(self, ser_obj: serial.Serial, cmd: str) -> str:
         """Send serial command and read response
         
         Args:
+            ser_obj: Serial object to write to
             cmd: Command string to send
             
         Returns:
             Response string, returns empty string if no response
         """
-        self.ser.write(cmd.encode('ascii'))
+        ser_obj.write(cmd.encode('ascii'))
         time.sleep(0.008)
-        response = self.ser.read_all()
+        response = ser_obj.read_all()
         return response.decode('ascii', errors='ignore') if response else ""
     
     def pwm_to_angle(self, response_str: str, pwm_min: int = 500, 
@@ -233,7 +255,7 @@ class ServoTeleoperatorSim:
         """Convert servo position to simulation action based on different robot arm types
         
         Args:
-            pose: 7-dimensional servo angle list (radians)
+            pose: Servo angle list (radians), length depends on robot (7 for single-arm, 16 for openarm_bi dual-arm)
             
         Returns:
             Corresponding robot arm action vector
@@ -327,6 +349,37 @@ class ServoTeleoperatorSim:
             action[10] = raw[5]  # right_shoulder_roll increment
             action[14] = raw[6]  # right_shoulder_yaw increment
             action[18] = raw[3]  # right_elbow increment (reuse 4th servo)
+        elif self.robot_uids == "openarm_bi":  # Humanoid robot
+            raw = np.array(pose, dtype=np.float32)
+            if raw.shape[0] != 16:
+                raise ValueError(f"openarm_bi expects 16 input joints, got {raw.shape[0]}")
+
+            # Explicit mapping to allow per-joint sign tweaks if needed
+            action = np.zeros(18, dtype=np.float32)
+            # Left arm 7 joints
+            action[0] = raw[0]
+            action[1] = raw[1]
+            action[2] = raw[2]
+            action[3] = raw[3]
+            action[4] = raw[4]
+            action[5] = raw[5]
+            action[6] = raw[6]
+            # Left gripper drives two finger joints
+            action[7] = raw[7]
+            action[8] = raw[7]
+            # Right arm 7 joints
+            action[9] = raw[8]
+            action[10] = raw[9]
+            action[11] = raw[10]
+            action[12] = raw[11]
+            action[13] = raw[12]
+            action[14] = raw[13]
+            action[15] = raw[14]
+            # Right gripper drives two finger joints
+            action[16] = raw[15]
+            action[17] = raw[15]
+
+        
 
         else: 
             raise ValueError(f"Unsupported robot arm type: {self.robot_uids}")
@@ -358,23 +411,49 @@ class ServoTeleoperatorSim:
         Args:
             on_send: Callback function that receives angle data list
         """
-        num_joints = 7
+        if self.robot_uids == "openarm_bi":
+            num_joints = 16
+            left_count = 8
+            right_count = 8
+        else:
+            num_joints = 7
+
         arm_pos = [0.0] * num_joints
 
         period = max(1.0 / self.rate, 1e-6)
         next_time = time.monotonic()
 
         while not self.stop_event.is_set():
-            # Read all joint angles
-            for i in range(num_joints):
-                response = self.send_command(f'#{i:03d}PRAD!')
-                angle = self.pwm_to_angle(response.strip())
-                if angle is not None:
-                    # Calculate angle relative to zero position
-                    new_angle = angle - self.zero_angles[i]
-                    arm_pos[i] = np.radians(new_angle)
-                else: 
-                    raise ValueError(f"Servo {i} response error: {response.strip()}")
+            if self.robot_uids == "openarm_bi":
+                # Left arm on primary port
+                for i in range(left_count):
+                    response = self.send_command(self.ser_primary, f"#{i:03d}PRAD!")
+                    angle = self.pwm_to_angle(response.strip())
+                    if angle is not None:
+                        new_angle = angle - self.zero_angles[i]
+                        arm_pos[i] = np.radians(new_angle)
+                    else:
+                        raise ValueError(f"Left arm servo {i} response error: {response.strip()}")
+                # Right arm on secondary port
+                for i in range(right_count):
+                    response = self.send_command(self.ser_secondary, f"#{i:03d}PRAD!")
+                    angle = self.pwm_to_angle(response.strip())
+                    if angle is not None:
+                        new_angle = angle - self.zero_angles[left_count + i]
+                        arm_pos[left_count + i] = np.radians(new_angle)
+                    else:
+                        raise ValueError(f"Right arm servo {i} response error: {response.strip()}")
+            else:
+                # Read all joint angles
+                for i in range(num_joints):
+                    response = self.send_command(self.ser_primary, f"#{i:03d}PRAD!")
+                    angle = self.pwm_to_angle(response.strip())
+                    if angle is not None:
+                        # Calculate angle relative to zero position
+                        new_angle = angle - self.zero_angles[i]
+                        arm_pos[i] = np.radians(new_angle)
+                    else: 
+                        raise ValueError(f"Servo {i} response error: {response.strip()}")
             
             # Publish latest data and call callback
             self.publish_arm_pos(arm_pos)
@@ -457,7 +536,7 @@ if __name__ == "__main__":
         '--robot', '-r', 
         type=str, 
         default='so100',
-        choices=['arx-x5', 'so100', 'xarm6_robotiq', 'panda', 'x_fetch', 'piper', 'widowx250s'],
+        choices=['arx-x5', 'so100', 'xarm6_robotiq', 'panda', 'x_fetch', 'piper', 'widowx250s', 'openarm_bi'],
         help='Select robot arm type to control'
     )
     parser.add_argument(

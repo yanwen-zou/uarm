@@ -28,3 +28,4 @@ from .xarm import XArm7Ability
 from .xarm6 import *
 from .arx_x5 import ArxX5
 from .fetch_xlerobot import XFetch
+from .openarm_bi import *

@@ -145,7 +145,20 @@ class StaticRobotViewer:
                     print("SO100 set to home pose")
                 else:
                     print("SO100 using default pose")
-                    
+
+            elif self.robot_uids == "openarm_bi":
+                # openarm dual-arm robot
+                if self.pose_name == "home":
+                    # Set to home position
+                    home_pose = np.array([
+                        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,     # left arm 7+1 DOF
+                        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0      # right arm 7+1 DOF
+                    ])
+                    agent.reset(home_pose)
+                    print("openarm_bi set to home pose")
+                else:
+                    print("openarm_bi using default pose")
+                                
         except Exception as e:
             print(f"Error setting robot pose: {e}")
     
@@ -233,7 +246,7 @@ def main():
         '--robot', '-r', 
         type=str, 
         default='so100',
-        choices=['arx-x5', 'so100', 'xarm6_robotiq', 'panda', 'x_fetch', 'unitree_h1', 'piper','widowx250s'],
+        choices=['arx-x5', 'so100', 'xarm6_robotiq', 'panda', 'x_fetch', 'unitree_h1', 'piper','widowx250s', 'openarm_bi'],
         help='Select robot arm type to display'
     )
     parser.add_argument(

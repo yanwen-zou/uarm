@@ -1,0 +1,6 @@
+name: openarm_bi
+urdf_file: openarm_bi.urdf
+root_link: base_link
+default_joint_positions:
+  left_joint1: 0
+  right_joint1: 0
