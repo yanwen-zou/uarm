@@ -19,7 +19,15 @@ class ServoTeleoperatorSim:
     Supported robot arm types: arx-x5, so100, xarm6_robotiq, panda, x_fetch, unitree_h1
     """
     
-    def __init__(self, scene: str, robot_uids: str, serial_port: str = '/dev/ttyUSB0', serial_port2: str = '/dev/ttyUSB1'):
+    def __init__(
+        self,
+        scene: str,
+        robot_uids: str,
+        serial_port: str = "/dev/ttyUSB0",
+        serial_port2: str = "/dev/ttyUSB1",
+        shader: str | None = "default",
+        main_thread_render: bool = True,
+    ):
         """Initialize teleoperation system
         
         Args:
@@ -27,6 +35,10 @@ class ServoTeleoperatorSim:
             robot_uids: Robot arm type identifier
             serial_port: Serial port device path
             serial_port2: Second serial port (used for dual-arm setups)
+            shader: Rendering shader pack. Use "default" (stable) instead of "rt-fast" if the GPU
+                cannot run the ray-tracing pipeline to avoid viewer crashes.
+            main_thread_render: If True, run step/render on the main thread to avoid driver
+                crashes caused by off-main rendering on some platforms.
         """
         # Serial port configuration
         self.SERIAL_PORT = serial_port
@@ -44,6 +56,7 @@ class ServoTeleoperatorSim:
         self.robot_uids = robot_uids
         self.gripper_range = 0.48
         # Reserve storage for incoming servo angles (8 DOF by default; 16 for dual-arm OpenArm)
+        self.main_thread_render = main_thread_render
         if robot_uids == "openarm_bi":
             self.zero_angles = [0.0] * 16
             self.sim_init_angles = [0.0] * 16
@@ -67,15 +80,20 @@ class ServoTeleoperatorSim:
         else: 
             self.control_mode = "pd_joint_pos"
 
+        render_kwargs = {}
+        if shader:
+            render_kwargs.update(
+                sensor_configs=dict(shader_pack=shader),
+                human_render_camera_configs=dict(shader_pack=shader),
+                viewer_camera_configs=dict(shader_pack=shader),
+            )
+
         # Create simulation environment
         self.env = gym.make(
             scene,
             robot_uids=robot_uids,
             render_mode="human",
             control_mode=self.control_mode,
-            sensor_configs=dict(shader_pack="rt-fast"),
-            human_render_camera_configs=dict(shader_pack="rt-fast"),
-            viewer_camera_configs=dict(shader_pack="rt-fast"),
             sim_config=dict(
                 default_materials_config=dict(
                     static_friction=10.0,  # Static friction
@@ -83,6 +101,7 @@ class ServoTeleoperatorSim:
                     restitution=0.0       # Restitution coefficient
                 )
             ),
+            **render_kwargs,
         )
         obs, _ = self.env.reset(seed=0)
         print("Action space:", self.env.action_space)
@@ -99,11 +118,13 @@ class ServoTeleoperatorSim:
         )
 
         # Create consumer thread (control simulation)
-        self.consume_thread = Thread(
-            target=self.pose_consumer_loop, 
-            args=(self.teleop_sim_handler,), 
-            daemon=True
-        )
+        self.consume_thread = None
+        if not self.main_thread_render:
+            self.consume_thread = Thread(
+                target=self.pose_consumer_loop, 
+                args=(self.teleop_sim_handler,), 
+                daemon=True
+            )
 
         self._setup_camera_pose()
 
@@ -508,22 +529,51 @@ class ServoTeleoperatorSim:
         """Start teleoperation system"""
         print("Starting angle reading thread...")
         self.produce_thread.start()
-        print("Starting simulation control thread...")
-        self.consume_thread.start()
+        if self.consume_thread is not None:
+            print("Starting simulation control thread...")
+            self.consume_thread.start()
         
-        try: 
+        try:
             print("System running, press Ctrl+C to stop...")
-            while True: 
-                time.sleep(0.5)
+            if self.consume_thread is None:
+                # Run step/render on main thread for better stability
+                period = max(1.0 / self.rate, 1e-6)
+                next_time = time.monotonic()
+                while True:
+                    pose = self.get_latest_arm_pos(timeout=0.0)
+                    if pose is not None:
+                        try:
+                            action = self.convert_pose_to_action(pose)
+                            self.teleop_sim_handler(action, dwell=0.0)
+                        except Exception as e:
+                            print(f"Simulation control callback error: {e}")
+                    next_time += period
+                    sleep_dt = next_time - time.monotonic()
+                    if sleep_dt > 0:
+                        time.sleep(sleep_dt)
+                    else:
+                        next_time = time.monotonic()
+            else:
+                while True:
+                    time.sleep(0.5)
         except KeyboardInterrupt:
             print("Received interrupt signal, preparing to stop...")
         finally:
             self.stop_event.set()
             self.produce_thread.join(timeout=2.0)
-            self.consume_thread.join(timeout=2.0)
+            if self.consume_thread is not None:
+                self.consume_thread.join(timeout=2.0)
             print("All threads stopped")
             self.env.close()
-            self.ser.close()
+            try:
+                self.ser_primary.close()
+            except Exception:
+                pass
+            try:
+                if self.ser_secondary:
+                    self.ser_secondary.close()
+            except Exception:
+                pass
             print("Resource cleanup completed")
 
 
@@ -552,6 +602,18 @@ if __name__ == "__main__":
         help='Control frequency (Hz)'
     )
     parser.add_argument(
+        '--shader',
+        type=str,
+        default='default',
+        choices=['default', 'minimal', 'rt-fast', 'rt'],
+        help='Shader pack for rendering. Use default/minimal if rt-fast causes GPU crashes.'
+    )
+    parser.add_argument(
+        '--threaded-render',
+        action='store_true',
+        help='Keep step/render in a separate thread (may crash on some GPUs). Default is main-thread rendering.'
+    )
+    parser.add_argument(
         '--serial-port', 
         type=str, 
         default='/dev/ttyUSB0',
@@ -572,7 +634,13 @@ if __name__ == "__main__":
     
     # Create and run simulation instance
     try:
-        sim = ServoTeleoperatorSim(scene=args.scene, robot_uids=args.robot, serial_port=args.serial_port)
+        sim = ServoTeleoperatorSim(
+            scene=args.scene,
+            robot_uids=args.robot,
+            serial_port=args.serial_port,
+            shader=args.shader,
+            main_thread_render=not args.threaded_render,
+        )
         sim.rate = args.rate
         sim.run()
     except Exception as e:
